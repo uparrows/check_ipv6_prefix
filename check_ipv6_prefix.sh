@@ -7,29 +7,38 @@ get_ipv6_prefix() {
 
 # 检测IPv6前缀
 ipv6_prefix=$(get_ipv6_prefix)
+log_msg=""
+restart_wan=0
 
 if [ -z "$ipv6_prefix" ]; then
-    logger -t IPv6_PREFIX_CHECK "未检测到IPv6分发前缀，尝试重启WAN接口..."
-    echo "$(date) - 未检测到IPv6分发前缀，尝试重启WAN接口..." >> /tmp/ipv6_check.log
+    # 情况1：未检测到任何前缀
+    log_msg="未检测到IPv6分发前缀，尝试重启WAN接口..."
+    restart_wan=1
+else
+    # 提取前缀中的地址部分（去掉掩码）
+    addr_part=${ipv6_prefix%%/*}
     
+    # 检查是否是ULA地址（fc00::/7 范围）
+    case ${addr_part:0:2} in
+        fc|FC|fd|FD)
+            # 情况2：检测到ULA前缀
+            log_msg="检测到无效的ULA IPv6前缀: $ipv6_prefix，尝试重启WAN接口..."
+            restart_wan=1
+            ;;
+        *)
+            # 情况3：检测到公网前缀
+            log_msg="当前IPv6前缀正常（公网）: $ipv6_prefix"
+            ;;
+    esac
+fi
+
+# 记录日志并执行操作
+logger -t IPv6_PREFIX_CHECK "$log_msg"
+echo "$(date) - $log_msg" >> /tmp/ipv6_check.log
+
+if [ $restart_wan -eq 1 ]; then
     # 重启WAN接口
     ifdown wan && ifup wan
-    
-    # 等待300秒后再次检查(不需要了，直接添加计划任务 */10 * * * * /usr/bin/check_ipv6_prefix.sh ，10分钟运行一次脚本）
-    #sleep 300
-    #ipv6_prefix=$(get_ipv6_prefix)
-    
-    #if [ -z "$ipv6_prefix" ]; then
-    #    logger -t IPv6_PREFIX_CHECK "重启WAN接口后仍未获取到IPv6前缀"
-    #    echo "$(date) - 重启WAN接口后仍未获取到IPv6前缀" >> /tmp/ipv6_check.log
-    #    exit 1
-    #else
-    #    logger -t IPv6_PREFIX_CHECK "重启WAN接口后成功获取IPv6前缀: $ipv6_prefix"
-    #    echo "$(date) - 重启WAN接口后成功获取IPv6前缀: $ipv6_prefix" >> /tmp/ipv6_check.log
-    #    exit 0
-    #fi
 else
-    logger -t IPv6_PREFIX_CHECK "当前IPv6前缀正常: $ipv6_prefix"
-    echo "$(date) - 当前IPv6前缀正常: $ipv6_prefix" >> /tmp/ipv6_check.log
     exit 0
 fi
