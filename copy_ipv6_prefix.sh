@@ -1,54 +1,68 @@
 #!/bin/sh
 
-# 获取IPv6前缀的函数
-get_ipv6_prefix() {
-    ifstatus lan | jsonfilter -e '@["ipv6-prefix-assignment"][0]["address"]' -e '@["ipv6-prefix-assignment"][0]["mask"]' | awk 'NR==1{prefix=$0} NR==2{mask=$0; print prefix "/" mask}'
+# 获取WAN口IPv6分发前缀
+get_wan_prefix() {
+    ip -6 route show | grep default | sed -e 's/^.*from //g' | sed 's/ via.*$//g'
 }
 
-# 检测IPv6前缀
-ipv6_prefix=$(get_ipv6_prefix)
-log_msg=""
-restart_wan=0
+# 获取LAN口IPv6分发前缀
+get_lan_prefix() {
+    ifstatus lan 2>/dev/null | jsonfilter -e '@["ipv6-prefix-assignment"][0]["address"]' -e '@["ipv6-prefix-assignment"][0]["mask"]' | awk 'NR==1{prefix=$0} NR==2{mask=$0; print prefix "/" mask}'
+}
 
-if [ -z "$ipv6_prefix" ]; then
-    # 情况1：未检测到任何前缀
-    log_msg="未检测到IPv6分发前缀，尝试重启WAN接口..."
-    restart_wan=1
-	sleep 20s
-	uci set network.globals.ula_prefix="$(ip -6 route show | grep default | sed -e 's/^.*from //g' | sed 's/ via.*$//g')"
-	uci commit network
-	ifup lan
-else
-    # 提取前缀中的地址部分（去掉掩码）
-    addr_part=${ipv6_prefix%%/*}
+# 主函数
+main() {
+    echo "正在检查IPv6前缀..."
     
-    # 检查是否是ULA地址（fc00::/7 范围）
-    case ${addr_part:0:2} in
-        fc|FC|fd|FD)
-            # 情况2：检测到ULA前缀
-            log_msg="检测到无效的ULA IPv6前缀: $ipv6_prefix，尝试重启WAN接口..."
-            restart_wan=1
-			sleep 20s
-			uci set network.globals.ula_prefix="$(ip -6 route show | grep default | sed -e 's/^.*from //g' | sed 's/ via.*$//g')"
-			uci commit network
-			ifup lan
-            ;;
-        *)
-            # 情况3：检测到公网前缀
-            log_msg="当前IPv6前缀正常（公网）: $ipv6_prefix"
-            ;;
-    esac
-fi
+    # 获取WAN口前缀
+    wan_prefix=$(get_wan_prefix)
+    echo "WAN口IPv6前缀: $wan_prefix"
+    
+    # 获取LAN口前缀
+    lan_prefix=$(get_lan_prefix)
+    echo "LAN口IPv6前缀: $lan_prefix"
+    
+    # 检查WAN口前缀是否为空
+    if [ -z "$wan_prefix" ]; then
+        echo "错误: WAN口IPv6前缀为空，执行ifup wan..."
+        ifup wan
+        exit 1
+    fi
+    
+    # 检查LAN口前缀是否为空
+    if [ -z "$lan_prefix" ]; then
+        echo "警告: LAN口IPv6前缀为空，需要更新配置..."
+        update_network_config
+        return
+    fi
+    
+    # 比较WAN口和LAN口前缀是否一致
+    if [ "$wan_prefix" != "$lan_prefix" ]; then
+        echo "WAN口和LAN口IPv6前缀不一致，需要更新配置..."
+        update_network_config
+    else
+        echo "WAN口和LAN口IPv6前缀一致，无需操作。"
+    fi
+}
 
-# 记录日志并执行操作
-logger -t IPv6_PREFIX_CHECK "$log_msg"
-echo "$(date) - $log_msg" >> /tmp/ipv6_check.log
+# 更新网络配置函数
+update_network_config() {
+    echo "正在更新网络配置..."
+    
+    # 获取当前的WAN口前缀
+    current_wan_prefix=$(get_wan_prefix)
+    
+    if [ -n "$current_wan_prefix" ]; then
+        echo "设置ULA前缀为: $current_wan_prefix"
+        uci set network.globals.ula_prefix="$current_wan_prefix"
+        uci commit network
+        echo "重启LAN接口..."
+        ifup lan
+        echo "网络配置更新完成。"
+    else
+        echo "错误: 无法获取有效的WAN口IPv6前缀，跳过更新。"
+    fi
+}
 
-if [ $restart_wan -eq 1 ]; then
-    # 重启WAN接口
-    ifdown wan && ifup wan
-else
-    exit 0
-fi
-
-	
+# 运行主函数
+main
